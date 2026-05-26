@@ -108,6 +108,12 @@ class MainWindow(QMainWindow):
         act_export.triggered.connect(self._export_current)
         tb.addAction(act_export)
 
+        # Import old database
+        act_import_db = QAction("🗄 Import DB", self)
+        act_import_db.setStatusTip("Import entries from an older database file")
+        act_import_db.triggered.connect(self._import_database)
+        tb.addAction(act_import_db)
+
         tb.addSeparator()
 
         # Settings
@@ -311,7 +317,7 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _export_current(self):
-        from utils.exporter import export_entry_to_pdf
+        from utils.exporter import export_entry_to_pdf, get_last_export_error
         # Save first
         self._do_save(self.editor.get_content())
         entry = self.db.get_entry(self._current_date)
@@ -328,8 +334,73 @@ class MainWindow(QMainWindow):
         if ok:
             QMessageBox.information(self, "Export Complete", f"PDF saved:\n{path}")
         else:
+            details = get_last_export_error().strip()
+            if details:
+                msg = f"Could not generate PDF.\n\nReason:\n{details}"
+            else:
+                msg = "Could not generate PDF."
             QMessageBox.warning(self, "Export Failed",
-                                "Could not generate PDF.\nMake sure reportlab is installed.")
+                                msg)
+
+    def _import_database(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Previous Database",
+            "",
+            "SQLite Database (*.db *.sqlite *.sqlite3);;All Files (*.*)",
+        )
+        if not path:
+            return
+
+        if os.path.abspath(path) == os.path.abspath(self.db.db_path):
+            QMessageBox.warning(self, "Import Database", "Selected file is the current database.")
+            return
+
+        overwrite_btn = QMessageBox.question(
+            self,
+            "Import Mode",
+            "If an entry with the same date already exists, replace it with the imported one?\n"
+            "Choose 'No' to keep current entries and import only missing dates.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.No,
+        )
+        if overwrite_btn == QMessageBox.StandardButton.Cancel:
+            return
+
+        import_settings_btn = QMessageBox.question(
+            self,
+            "Import Settings",
+            "Also import settings from the old database?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+
+        overwrite_existing = overwrite_btn == QMessageBox.StandardButton.Yes
+        import_settings = import_settings_btn == QMessageBox.StandardButton.Yes
+
+        try:
+            stats = self.db.import_from_database(
+                path,
+                overwrite_existing=overwrite_existing,
+                import_settings=import_settings,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Import Failed", f"Database import failed:\n{e}")
+            return
+
+        self.sidebar.refresh()
+        self._load_entry_for_date(self._current_date)
+
+        summary = (
+            "Import complete.\n\n"
+            f"Entries imported: {stats.get('entries_imported', 0)}\n"
+            f"Entries updated: {stats.get('entries_updated', 0)}\n"
+            f"Entries skipped: {stats.get('entries_skipped', 0)}\n"
+            f"Tags merged: {stats.get('tags_imported', 0)}\n"
+            f"Attachments imported: {stats.get('attachments_imported', 0)}\n"
+            f"Settings imported: {stats.get('settings_imported', 0)}"
+        )
+        QMessageBox.information(self, "Import Database", summary)
 
     def _open_settings(self):
         from ui.settings_dialog import SettingsDialog

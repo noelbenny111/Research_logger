@@ -302,3 +302,170 @@ class DatabaseManager:
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    # ─── Import / Migration ───────────────────────────────────────────────────
+
+    def import_from_database(
+        self,
+        source_db_path: str,
+        overwrite_existing: bool = False,
+        import_settings: bool = False,
+    ) -> Dict[str, int]:
+        """Import entries/tags/attachments from a previous Research Logger DB.
+
+        Returns import statistics.
+        """
+        if not source_db_path:
+            raise ValueError("Source database path is required")
+
+        source_abs = os.path.abspath(source_db_path)
+        current_abs = os.path.abspath(self.db_path)
+        if source_abs == current_abs:
+            raise ValueError("Source database cannot be the same as current database")
+        if not os.path.exists(source_abs):
+            raise FileNotFoundError(f"Database not found: {source_abs}")
+
+        stats = {
+            "entries_imported": 0,
+            "entries_updated": 0,
+            "entries_skipped": 0,
+            "tags_imported": 0,
+            "attachments_imported": 0,
+            "settings_imported": 0,
+        }
+
+        conn = self._get_conn()
+        src = sqlite3.connect(source_abs)
+        src.row_factory = sqlite3.Row
+
+        try:
+            table_rows = src.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+            source_tables = {r["name"] for r in table_rows}
+
+            source_has_entries = "entries" in source_tables
+            source_has_tags = all(t in source_tables for t in ("tags", "entry_tags", "entries"))
+            source_has_attachments = all(t in source_tables for t in ("attachments", "entries"))
+            source_has_settings = "settings" in source_tables
+
+            if not source_has_entries:
+                raise ValueError("Source database does not contain an entries table")
+
+            src_entries = src.execute(
+                "SELECT entry_date, content FROM entries ORDER BY entry_date"
+            ).fetchall()
+
+            imported_dates = []
+            for row in src_entries:
+                entry_date = row["entry_date"]
+                content = row["content"] or ""
+                existing = self.get_entry(entry_date)
+
+                if existing and not overwrite_existing:
+                    stats["entries_skipped"] += 1
+                    continue
+
+                if existing and overwrite_existing:
+                    stats["entries_updated"] += 1
+                else:
+                    stats["entries_imported"] += 1
+
+                self.save_entry(entry_date, content)
+                imported_dates.append(entry_date)
+
+            if source_has_tags:
+                src_tag_rows = src.execute(
+                    """
+                    SELECT e.entry_date, t.name AS tag_name
+                    FROM entry_tags et
+                    JOIN tags t ON t.id = et.tag_id
+                    JOIN entries e ON e.id = et.entry_id
+                    ORDER BY e.entry_date
+                    """
+                ).fetchall()
+
+                date_to_tags: Dict[str, set] = {}
+                for r in src_tag_rows:
+                    d = r["entry_date"]
+                    date_to_tags.setdefault(d, set()).add((r["tag_name"] or "").strip().lower())
+
+                for d, imported_tags in date_to_tags.items():
+                    if not imported_tags:
+                        continue
+                    entry = self.get_entry(d)
+                    if not entry:
+                        continue
+
+                    if overwrite_existing:
+                        merged_tags = sorted(t for t in imported_tags if t)
+                    else:
+                        current_tags = set(self.get_entry_tags(entry["id"]))
+                        merged_tags = sorted((current_tags | imported_tags) - {""})
+
+                    before_count = len(set(self.get_entry_tags(entry["id"])))
+                    self.set_entry_tags(d, merged_tags)
+                    after_count = len(set(merged_tags))
+                    if after_count > before_count:
+                        stats["tags_imported"] += (after_count - before_count)
+
+            if source_has_attachments:
+                src_att_rows = src.execute(
+                    """
+                    SELECT e.entry_date, a.filename, a.filepath, a.file_type
+                    FROM attachments a
+                    JOIN entries e ON e.id = a.entry_id
+                    ORDER BY e.entry_date, a.id
+                    """
+                ).fetchall()
+
+                for r in src_att_rows:
+                    d = r["entry_date"]
+                    entry = self.get_entry(d)
+                    if not entry:
+                        continue
+
+                    filename = r["filename"] or ""
+                    filepath = r["filepath"] or ""
+                    file_type = r["file_type"] or "file"
+                    if not filename or not filepath:
+                        continue
+
+                    exists = conn.execute(
+                        """
+                        SELECT 1 FROM attachments
+                        WHERE entry_id = ? AND filename = ? AND filepath = ?
+                        LIMIT 1
+                        """,
+                        (entry["id"], filename, filepath),
+                    ).fetchone()
+                    if exists:
+                        continue
+
+                    conn.execute(
+                        "INSERT INTO attachments (entry_id, filename, filepath, file_type) VALUES (?, ?, ?, ?)",
+                        (entry["id"], filename, filepath, file_type),
+                    )
+                    stats["attachments_imported"] += 1
+
+            if import_settings and source_has_settings:
+                src_settings = src.execute("SELECT key, value FROM settings").fetchall()
+                for r in src_settings:
+                    key = r["key"]
+                    value = r["value"]
+                    if key is None or value is None:
+                        continue
+                    self.set_setting(str(key), str(value))
+                    stats["settings_imported"] += 1
+
+            # Rebuild FTS to ensure imported data is searchable.
+            try:
+                conn.execute("DELETE FROM entries_fts")
+                conn.execute("INSERT INTO entries_fts(entry_date, content) SELECT entry_date, content FROM entries")
+                conn.commit()
+            except Exception as e:
+                print(f"FTS rebuild warning after import: {e}")
+
+            return stats
+        finally:
+            src.close()

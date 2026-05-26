@@ -8,6 +8,18 @@ from datetime import date
 from typing import List, Dict, Any, Optional
 
 
+_LAST_EXPORT_ERROR = ""
+
+
+def _set_last_export_error(message: str):
+    global _LAST_EXPORT_ERROR
+    _LAST_EXPORT_ERROR = message or ""
+
+
+def get_last_export_error() -> str:
+    return _LAST_EXPORT_ERROR
+
+
 def _clean_for_pdf(text: str) -> str:
     """Strip markdown for plain-text PDF rendering."""
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
@@ -111,9 +123,15 @@ def export_entry_to_pdf(entry: Dict[str, Any], output_path: str) -> bool:
                 story.append(Paragraph(f"  • {att['filename']}", att_style))
 
         doc.build(story)
+        _set_last_export_error("")
         return True
-
+    except ImportError as e:
+        msg = f"Missing dependency while generating PDF: {e}"
+        _set_last_export_error(msg)
+        print(f"PDF export error: {msg}")
+        return False
     except Exception as e:
+        _set_last_export_error(str(e))
         print(f"PDF export error: {e}")
         return False
 
@@ -161,7 +179,14 @@ def export_summary_to_pdf(title: str, content: str, output_path: str) -> bool:
                 story.append(Paragraph(safe, body_style))
 
         doc.build(story)
+        _set_last_export_error("")
         return True
+    except ImportError as e:
+        msg = f"Missing dependency while generating PDF: {e}"
+        _set_last_export_error(msg)
+        print(f"PDF export error: {msg}")
+        return False
     except Exception as e:
+        _set_last_export_error(str(e))
         print(f"PDF export error: {e}")
         return False
