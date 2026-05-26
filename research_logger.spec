@@ -55,6 +55,9 @@ a = Analysis(
         'reportlab.lib.colors',
         'reportlab.lib.enums',
         'markdown2',
+        # Ensure Pillow (PIL) is bundled for ReportLab image support
+        'PIL',
+        'PIL.Image',
     ],
     hookspath=[],
     hooksconfig={},
@@ -67,7 +70,6 @@ a = Analysis(
         'pandas',
         'IPython',
         'jupyter',
-        'PIL',
         'cv2',
         'torch',
         'tensorflow',
