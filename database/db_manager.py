@@ -272,6 +272,10 @@ class DatabaseManager:
             "theme": "light",
             "auto_save_interval": "10",
             "morning_summary": "true",
+            "editor_font_size": "11",
+            "claude_model": "claude-3-5-sonnet-20240620",
+            "claude_api_key": "",
+            "claude_enabled": "false",
         }
         conn = self._get_conn()
         for key, value in defaults.items():

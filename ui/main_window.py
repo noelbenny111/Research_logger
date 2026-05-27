@@ -121,6 +121,13 @@ class MainWindow(QMainWindow):
         act_settings.triggered.connect(self._open_settings)
         tb.addAction(act_settings)
 
+        tb.addSeparator()
+
+        act_claude = QAction("🤖 Claude", self)
+        act_claude.setStatusTip("Ask Claude about the current entry")
+        act_claude.triggered.connect(self._open_claude_assistant)
+        tb.addAction(act_claude)
+
         # Stretch spacer
         spacer = QWidget()
         spacer.setSizePolicy(
@@ -405,7 +412,23 @@ class MainWindow(QMainWindow):
     def _open_settings(self):
         from ui.settings_dialog import SettingsDialog
         dlg = SettingsDialog(self.db, self)
-        dlg.exec()
+        if dlg.exec():
+            self.editor.font_size_spin.setValue(int(self.db.get_setting("editor_font_size", "11")))
+
+    def _open_claude_assistant(self):
+        from html import escape
+        from ui.claude_dialog import ClaudeDialog
+
+        cursor = self.editor.editor.textCursor()
+        selection = cursor.selectedText().replace("\u2029", "\n") if cursor.hasSelection() else ""
+        entry_text = self.editor.get_content()
+        dlg = ClaudeDialog(self.db, entry_text=entry_text, selection_text=selection, parent=self)
+        if dlg.exec():
+            response = dlg.response_text.strip()
+            if response:
+                self.editor.insert_html(
+                    f"<hr><p><strong>Claude:</strong></p><p>{escape(response).replace(chr(10), '<br>')}</p>"
+                )
 
     # ─── Morning summary ───────────────────────────────────────────────────────
 

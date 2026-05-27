@@ -15,7 +15,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QToolBar,
-    QPushButton, QComboBox, QColorDialog, QInputDialog
+    QPushButton, QComboBox, QColorDialog, QInputDialog, QSpinBox
 )
 
 from utils.richtext import looks_like_html
@@ -41,10 +41,93 @@ class RichTextEdit(QTextEdit):
         image_format.setName(image_path.as_uri())
         cursor.insertImage(image_format)
 
+    def _image_path_at_cursor(self, cursor: QTextCursor) -> Path | None:
+        image_format = cursor.charFormat().toImageFormat()
+        if not image_format.isValid():
+            return None
+        name = image_format.name().strip()
+        if not name:
+            return None
+        if name.startswith("file:///"):
+            from urllib.parse import unquote, urlparse
+            parsed = urlparse(name)
+            if parsed.path:
+                return Path(unquote(parsed.path.lstrip("/")))
+        return Path(name)
+
+    def _reload_document_html(self):
+        html = self.toHtml()
+        self.blockSignals(True)
+        self.setHtml(html)
+        self.blockSignals(False)
+
+    def _apply_image_edit(self, image_path: Path, mode: str, width: int, height: int, keep_ratio: bool):
+        from PIL import Image
+
+        with Image.open(image_path) as img:
+            if mode == "Crop to square":
+                side = min(img.width, img.height)
+                left = max(0, (img.width - side) // 2)
+                top = max(0, (img.height - side) // 2)
+                edited = img.crop((left, top, left + side, top + side))
+            else:
+                target_width = max(1, width)
+                target_height = max(1, height)
+                if keep_ratio:
+                    ratio = min(target_width / max(img.width, 1), target_height / max(img.height, 1))
+                    target_width = max(1, round(img.width * ratio))
+                    target_height = max(1, round(img.height * ratio))
+                edited = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+
+            edited.save(image_path)
+
+        self._reload_document_html()
+
     def _save_clipboard_image(self, image: QImage) -> Path:
         from ui.attachments_panel import save_inline_image
 
         return save_inline_image(self._current_date, image)
+
+    def _transform_saved_image(self, image_path: Path):
+        from PIL import Image
+
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Paste Image",
+            "How should the pasted image be inserted?",
+            ["Original size", "Resize to width...", "Crop to square"],
+            0,
+            False,
+        )
+        if not ok:
+            return
+
+        if choice == "Resize to width...":
+            width, ok = QInputDialog.getInt(
+                self,
+                "Resize Image",
+                "Target width (px):",
+                640,
+                64,
+                4000,
+                1,
+            )
+            if not ok:
+                return
+            with Image.open(image_path) as img:
+                ratio = width / max(img.width, 1)
+                new_height = max(1, round(img.height * ratio))
+                resized = img.resize((width, new_height), Image.Resampling.LANCZOS)
+                resized.save(image_path)
+            return
+
+        if choice == "Crop to square":
+            with Image.open(image_path) as img:
+                side = min(img.width, img.height)
+                left = (img.width - side) // 2
+                top = (img.height - side) // 2
+                cropped = img.crop((left, top, left + side, top + side))
+                cropped.save(image_path)
 
     def canInsertFromMimeData(self, source):
         if source.hasImage() or source.hasUrls():
@@ -56,6 +139,7 @@ class RichTextEdit(QTextEdit):
             image = source.imageData()
             if isinstance(image, QImage) and not image.isNull():
                 saved = self._save_clipboard_image(image)
+                self._transform_saved_image(saved)
                 self._insert_image_path(saved)
                 return
 
@@ -72,6 +156,43 @@ class RichTextEdit(QTextEdit):
                 return
 
         super().insertFromMimeData(source)
+
+    def contextMenuEvent(self, event):
+        cursor = self.cursorForPosition(event.pos())
+        image_path = self._image_path_at_cursor(cursor)
+
+        menu = self.createStandardContextMenu(event.pos())
+        image_action = None
+        if image_path and image_path.exists():
+            menu.addSeparator()
+            image_action = menu.addAction("🖼 Image Properties...")
+
+        action = menu.exec(event.globalPos())
+        if image_action and action == image_action:
+            self._edit_inline_image(image_path)
+
+    def _edit_inline_image(self, image_path: Path):
+        from PIL import Image
+        from ui.image_properties_dialog import ImagePropertiesDialog
+
+        try:
+            with Image.open(image_path) as img:
+                width, height = img.size
+        except Exception:
+            return
+
+        dlg = ImagePropertiesDialog(image_path.name, width, height, self)
+        if not dlg.exec():
+            return
+
+        data = dlg.result_data()
+        self._apply_image_edit(
+            image_path,
+            data["mode"],
+            data["width"],
+            data["height"],
+            data["keep_ratio"],
+        )
 
 
 class EditorPanel(QWidget):
@@ -122,6 +243,7 @@ class EditorPanel(QWidget):
         self.editor.setObjectName("mainEditor")
         font = QFont("Segoe UI", 11) if os.name == "nt" else QFont("Sans Serif", 11)
         self.editor.setFont(font)
+        self.editor.setFontPointSize(int(self.db.get_setting("editor_font_size", "11")))
         self.editor.setAcceptRichText(True)
         self.editor.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.editor.textChanged.connect(self._on_text_changed)
@@ -156,6 +278,16 @@ class EditorPanel(QWidget):
         color_act = QAction("Text Color", self)
         color_act.triggered.connect(self._choose_text_color)
         self.toolbar.addAction(color_act)
+
+        self.toolbar.addSeparator()
+
+        self.toolbar.addWidget(QLabel("Font size"))
+        self.font_size_spin = QSpinBox()
+        self.font_size_spin.setRange(8, 32)
+        self.font_size_spin.setSuffix(" pt")
+        self.font_size_spin.setValue(int(self.db.get_setting("editor_font_size", "11")))
+        self.font_size_spin.valueChanged.connect(self._apply_font_size)
+        self.toolbar.addWidget(self.font_size_spin)
 
         table_act = QAction("Table", self)
         table_act.triggered.connect(self._insert_table)
@@ -277,6 +409,11 @@ class EditorPanel(QWidget):
             return
         fmt = QTextCharFormat()
         fmt.setForeground(color)
+        self._merge_char_format(fmt)
+
+    def _apply_font_size(self, size: int):
+        fmt = QTextCharFormat()
+        fmt.setFontPointSize(size)
         self._merge_char_format(fmt)
 
     def _insert_table(self):
